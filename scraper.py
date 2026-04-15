@@ -19,31 +19,31 @@ SEARCH_URL = "https://www.google.com/travel/flights"
 # SCRAPER
 # -------------------------
 async def scrape_flights(page, cabin="business"):
-    await page.goto(SEARCH_URL)
+    # Pre-built Google Flights URL
+    base_url = "https://www.google.com/travel/flights"
 
-    # Input route
-    await page.wait_for_timeout(3000)
-
-    # NOTE: Google Flights UI changes often → selectors are approximate
-    await page.fill('input[aria-label="Where from?"]', "Delhi")
-    await page.fill('input[aria-label="Where to?"]', "San Francisco")
-
-    # Select cabin
-    await page.click('button[aria-label*="cabin"]')
     if cabin == "business":
-        await page.click('text=Business')
+        cabin_code = "BUSINESS"
     else:
-        await page.click('text=Premium economy')
+        cabin_code = "PREMIUM_ECONOMY"
 
-    # Flexible dates (important)
-    await page.click('text=Flexible dates')
+    url = f"{base_url}?hl=en#flt=DEL.SFO.2026-05-20*SFO.DEL.2026-09-20;c:{cabin_code};e:1;sd:1;t:f"
 
+    await page.goto(url)
     await page.wait_for_timeout(8000)
 
     html = await page.content()
     soup = BeautifulSoup(html, "lxml")
 
     results = []
+
+    for item in soup.select("div[role='listitem']")[:10]:
+        text = item.get_text(" ", strip=True)
+
+        if "$" in text:
+            results.append(text)
+
+    return results[:5]
 
     for item in soup.select("div[role='listitem']")[:10]:
         text = item.get_text(" ", strip=True)
