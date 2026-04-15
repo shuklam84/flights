@@ -43,7 +43,7 @@ async def get_price(page, dep, ret, cabin):
     url = f"https://www.google.com/travel/flights?q=Flights%20to%20San%20Francisco%20from%20Delhi&hl=en#flt={ORIGIN}.{DEST}.{dep}*{DEST}.{ORIGIN}.{ret};c:{cabin_code};e:1"
 
     await page.goto(url)
-    await page.wait_for_timeout(6000)
+    await page.wait_for_timeout(4000)
 
     html = await page.content()
 
@@ -62,28 +62,40 @@ async def get_price(page, dep, ret, cabin):
 # MAIN SEARCH
 # -------------------------
 async def search(cabin):
-    outbound_dates = generate_dates(OUTBOUND_START, OUTBOUND_END, 2)
-    return_dates = generate_dates(RETURN_START, RETURN_END, 3)
+    outbound_dates = generate_dates(OUTBOUND_START, OUTBOUND_END, 3)
+    return_dates = generate_dates(RETURN_START, RETURN_END, 4)
 
     results = []
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
+
+        tasks = []
+
+        async def worker(dep, ret):
+            page = await browser.new_page()
+            try:
+                price = await get_price(page, dep, ret, cabin)
+                if price:
+                    return {"dep": dep, "ret": ret, "price": price}
+            except:
+                return None
+            finally:
+                await page.close()
 
         for dep in outbound_dates:
             for ret in return_dates:
-                try:
-                    price = await get_price(page, dep, ret, cabin)
+                tasks.append(worker(dep, ret))
 
-                    if price:
-                        results.append({
-                            "dep": dep,
-                            "ret": ret,
-                            "price": price
-                        })
-                except:
-                    continue
+        # Run in parallel batches (important)
+        batch_size = 10
+        for i in range(0, len(tasks), batch_size):
+            batch = tasks[i:i+batch_size]
+            results_batch = await asyncio.gather(*batch)
+
+            for r in results_batch:
+                if r:
+                    results.append(r)
 
         await browser.close()
 
