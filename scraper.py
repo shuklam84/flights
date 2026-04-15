@@ -1,10 +1,11 @@
 import asyncio
 from playwright.async_api import async_playwright
-from bs4 import BeautifulSoup
 import datetime
 import smtplib
 from email.mime.text import MIMEText
 import os
+import re
+import json
 
 EMAIL = os.environ["EMAIL"]
 EMAIL_PASSWORD = os.environ["EMAIL_PASSWORD"]
@@ -13,44 +14,80 @@ TO_EMAIL = os.environ["TO_EMAIL"]
 # -------------------------
 # CONFIG
 # -------------------------
-SEARCH_URL = "https://www.google.com/travel/flights"
+ORIGIN = "DEL"
+DEST = "SFO"
+
+OUTBOUND_START = datetime.date(2026, 5, 15)
+OUTBOUND_END = datetime.date(2026, 6, 30)
+
+RETURN_START = datetime.date(2026, 9, 15)
+RETURN_END = datetime.date(2026, 10, 31)
 
 # -------------------------
-# SCRAPER
+# DATE GENERATOR
 # -------------------------
-async def scrape_flights(page, cabin="business"):
-    # Pre-built Google Flights URL
-    base_url = "https://www.google.com/travel/flights"
+def generate_dates(start, end, step):
+    dates = []
+    d = start
+    while d <= end:
+        dates.append(d.strftime("%Y-%m-%d"))
+        d += datetime.timedelta(days=step)
+    return dates
 
-    if cabin == "business":
-        cabin_code = "BUSINESS"
-    else:
-        cabin_code = "PREMIUM_ECONOMY"
+# -------------------------
+# SCRAPE ONE SEARCH
+# -------------------------
+async def get_price(page, dep, ret, cabin):
+    cabin_code = "BUSINESS" if cabin == "business" else "PREMIUM_ECONOMY"
 
-    url = f"{base_url}?hl=en#flt=DEL.SFO.2026-05-20*SFO.DEL.2026-09-20;c:{cabin_code};e:1;sd:1;t:f"
+    url = f"https://www.google.com/travel/flights?q=Flights%20to%20San%20Francisco%20from%20Delhi&hl=en#flt={ORIGIN}.{DEST}.{dep}*{DEST}.{ORIGIN}.{ret};c:{cabin_code};e:1"
 
     await page.goto(url)
-    await page.wait_for_timeout(8000)
+    await page.wait_for_timeout(6000)
 
     html = await page.content()
-    soup = BeautifulSoup(html, "lxml")
+
+    # Extract price via regex (fast + reliable enough)
+    prices = re.findall(r'\$\d{3,5}', html)
+
+    if not prices:
+        return None
+
+    # Take cheapest visible
+    price = min([int(p.replace("$", "")) for p in prices])
+
+    return price
+
+# -------------------------
+# MAIN SEARCH
+# -------------------------
+async def search(cabin):
+    outbound_dates = generate_dates(OUTBOUND_START, OUTBOUND_END, 2)
+    return_dates = generate_dates(RETURN_START, RETURN_END, 3)
 
     results = []
 
-    for item in soup.select("div[role='listitem']")[:10]:
-        text = item.get_text(" ", strip=True)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
 
-        if "$" in text:
-            results.append(text)
+        for dep in outbound_dates:
+            for ret in return_dates:
+                try:
+                    price = await get_price(page, dep, ret, cabin)
 
-    return results[:5]
+                    if price:
+                        results.append({
+                            "dep": dep,
+                            "ret": ret,
+                            "price": price
+                        })
+                except:
+                    continue
 
-    for item in soup.select("div[role='listitem']")[:10]:
-        text = item.get_text(" ", strip=True)
+        await browser.close()
 
-        if "$" in text:
-            results.append(text)
-
+    results.sort(key=lambda x: x["price"])
     return results[:5]
 
 # -------------------------
@@ -62,12 +99,12 @@ def send_email(premium, business):
     body = f"✈️ DEL → SFO Flight Deals\nDate: {today}\n\n"
 
     body += "=== Premium Economy ===\n"
-    for r in premium:
-        body += f"- {r}\n"
+    for i, r in enumerate(premium):
+        body += f"{i+1}. Outbound: {r['dep']} | Return: {r['ret']} | Price: ${r['price']*2}\n"
 
     body += "\n=== Business Class ===\n"
-    for r in business:
-        body += f"- {r}\n"
+    for i, r in enumerate(business):
+        body += f"{i+1}. Outbound: {r['dep']} | Return: {r['ret']} | Price: ${r['price']*2}\n"
 
     msg = MIMEText(body)
     msg["Subject"] = f"✈️ DEL→SFO Flight Deals – {today}"
@@ -79,20 +116,17 @@ def send_email(premium, business):
         server.send_message(msg)
 
 # -------------------------
-# MAIN
+# STOP CONDITION
+# -------------------------
+if datetime.date.today() > datetime.date(2026, 5, 10):
+    exit()
+
+# -------------------------
+# RUN
 # -------------------------
 async def main():
-    if datetime.date.today() > datetime.date(2026, 5, 10):
-        return
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
-
-        premium = await scrape_flights(page, "premium")
-        business = await scrape_flights(page, "business")
-
-        await browser.close()
+    premium = await search("premium")
+    business = await search("business")
 
     send_email(premium, business)
 
