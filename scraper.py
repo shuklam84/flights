@@ -4,16 +4,11 @@ import datetime
 import smtplib
 from email.mime.text import MIMEText
 import os
-import re
-import json
 
 EMAIL = os.environ["EMAIL"]
 EMAIL_PASSWORD = os.environ["EMAIL_PASSWORD"]
 TO_EMAIL = os.environ["TO_EMAIL"]
 
-# -------------------------
-# CONFIG
-# -------------------------
 ORIGIN = "DEL"
 DEST = "SFO"
 
@@ -35,31 +30,31 @@ def generate_dates(start, end, step):
     return dates
 
 # -------------------------
-# SCRAPE ONE SEARCH
+# EXTRACT FLIGHT CARDS
 # -------------------------
-async def get_price(page, dep, ret, cabin):
-    cabin_code = "BUSINESS" if cabin == "business" else "PREMIUM_ECONOMY"
+async def extract_flights(page):
+    flights = []
 
-    url = f"https://www.google.com/travel/flights?q=Flights%20to%20San%20Francisco%20from%20Delhi&hl=en#flt={ORIGIN}.{DEST}.{dep}*{DEST}.{ORIGIN}.{ret};c:{cabin_code};e:1"
+    cards = await page.query_selector_all("div[jscontroller]")
 
-    await page.goto(url)
-    await page.wait_for_timeout(4000)
+    for card in cards[:12]:
+        try:
+            text = await card.inner_text()
 
-    html = await page.content()
+            if "$" not in text:
+                continue
 
-    # Extract price via regex (fast + reliable enough)
-    prices = re.findall(r'\$\d{3,5}', html)
+            # Filter only usable itineraries
+            if "Nonstop" in text or "1 stop" in text:
+                flights.append(text)
 
-    if not prices:
-        return None
+        except:
+            continue
 
-    # Take cheapest visible
-    price = min([int(p.replace("$", "")) for p in prices])
-
-    return price
+    return flights[:3]
 
 # -------------------------
-# MAIN SEARCH
+# SEARCH FUNCTION
 # -------------------------
 async def search(cabin):
     outbound_dates = generate_dates(OUTBOUND_START, OUTBOUND_END, 3)
@@ -70,36 +65,35 @@ async def search(cabin):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
 
-        tasks = []
+        for dep in outbound_dates[:6]:
+            for ret in return_dates[:6]:
 
-        async def worker(dep, ret):
-            page = await browser.new_page()
-            try:
-                price = await get_price(page, dep, ret, cabin)
-                if price:
-                    return {"dep": dep, "ret": ret, "price": price}
-            except:
-                return None
-            finally:
+                page = await browser.new_page()
+
+                cabin_code = "BUSINESS" if cabin == "business" else "PREMIUM_ECONOMY"
+
+                url = f"https://www.google.com/travel/flights#flt={ORIGIN}.{DEST}.{dep}*{DEST}.{ORIGIN}.{ret};c:{cabin_code};e:1"
+
+                try:
+                    await page.goto(url)
+                    await page.wait_for_timeout(5000)
+
+                    flights = await extract_flights(page)
+
+                    for f in flights:
+                        results.append({
+                            "dep": dep,
+                            "ret": ret,
+                            "details": f
+                        })
+
+                except:
+                    pass
+
                 await page.close()
-
-        for dep in outbound_dates:
-            for ret in return_dates:
-                tasks.append(worker(dep, ret))
-
-        # Run in parallel batches (important)
-        batch_size = 10
-        for i in range(0, len(tasks), batch_size):
-            batch = tasks[i:i+batch_size]
-            results_batch = await asyncio.gather(*batch)
-
-            for r in results_batch:
-                if r:
-                    results.append(r)
 
         await browser.close()
 
-    results.sort(key=lambda x: x["price"])
     return results[:5]
 
 # -------------------------
@@ -110,13 +104,15 @@ def send_email(premium, business):
 
     body = f"✈️ DEL → SFO Flight Deals\nDate: {today}\n\n"
 
-    body += "=== Premium Economy ===\n"
+    body += "=== Premium Economy ===\n\n"
     for i, r in enumerate(premium):
-        body += f"{i+1}. Outbound: {r['dep']} | Return: {r['ret']} | Price: ${r['price']*2}\n"
+        body += f"{i+1}. {r['dep']} → {r['ret']}\n"
+        body += f"{r['details']}\n\n"
 
-    body += "\n=== Business Class ===\n"
+    body += "=== Business Class ===\n\n"
     for i, r in enumerate(business):
-        body += f"{i+1}. Outbound: {r['dep']} | Return: {r['ret']} | Price: ${r['price']*2}\n"
+        body += f"{i+1}. {r['dep']} → {r['ret']}\n"
+        body += f"{r['details']}\n\n"
 
     msg = MIMEText(body)
     msg["Subject"] = f"✈️ DEL→SFO Flight Deals – {today}"
@@ -134,7 +130,7 @@ if datetime.date.today() > datetime.date(2026, 5, 10):
     exit()
 
 # -------------------------
-# RUN
+# MAIN
 # -------------------------
 async def main():
     premium = await search("premium")
